@@ -9,7 +9,7 @@ from app.tools import projects
 
 
 def ok(payload: Any) -> dict:
-    text = payload if isinstance(payload, str) else json.dumps(payload, indent=1)
+    text = payload if isinstance(payload, str) else json.dumps(payload, separators=(",", ":"))
     return {"content": [{"type": "text", "text": text}]}
 
 
@@ -38,7 +38,7 @@ async def list_recent_projects(args: dict) -> dict:
 
 @tool(
     "list_project_files",
-    "List files in one project (most recently modified first). Secret and dependency files are hidden.",
+    "List the 50 most recently modified files in one project. Secret and dependency files are hidden.",
     {"project": str},
 )
 async def list_project_files(args: dict) -> dict:
@@ -50,12 +50,13 @@ async def list_project_files(args: dict) -> dict:
 
 @tool(
     "read_project_file",
-    "Read a text file from a project, e.g. README.md, notes, docs or source. Keys are redacted.",
-    {"project": str, "path": str},
+    "Read a text file from a project, e.g. README.md, notes, docs or source. Keys are redacted. "
+    "Returns up to 8,000 characters; pass `start` to continue a long file only if you need the rest.",
+    schema({"project": "string", "path": "string"}, {"start": "integer"}),
 )
 async def read_project_file(args: dict) -> dict:
     try:
-        return ok(projects.read_project_file(args["project"], args["path"]))
+        return ok(projects.read_project_file(args["project"], args["path"], int(args.get("start") or 0)))
     except projects.ProjectError as error:
         return fail(error)
 

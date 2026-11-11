@@ -10,6 +10,6 @@ CONTENT = Agent(
     tools=[*PROJECT_TOOLS, *build_draft_tools("content")],
     builtin_tools=["WebSearch", "WebFetch"],
     # A weekly brief scans several projects and searches the web before writing.
-    max_turns=30,
-    quick_actions=[INTERVIEW_ACTION, {"label": "Weekly brief", "prompt": "Write this week's brief."}],
+    max_turns=15,
+    quick_actions=[INTERVIEW_ACTION, {"label": "Weekly brief", "prompt": "Write this week's brief.", "fresh": True}],
 )

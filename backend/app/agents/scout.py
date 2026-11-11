@@ -10,12 +10,13 @@ SCOUT = Agent(
     tools=[list_recent_projects, read_project_file, *build_job_tools("scout")],
     builtin_tools=["WebSearch", "WebFetch"],
     # A search run checks several postings before saving them.
-    max_turns=30,
+    max_turns=15,
     quick_actions=[
         {
             "label": "Find AI jobs",
             "prompt": "Find 5 recent AI engineer openings that fit my profile and target location. "
             "Save them with an honest fit score.",
+            "fresh": True,
         },
         {
             "label": "Check a job post",

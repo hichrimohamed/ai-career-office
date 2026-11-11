@@ -4,7 +4,7 @@ import json
 from fastapi.testclient import TestClient
 
 from app.agents import AGENTS
-from app.core import llm, store
+from app.core import llm, sessions, store
 from app.main import app
 from app.tools.profile_tools import build_profile_tools
 
@@ -55,9 +55,13 @@ def test_tool_errors_are_reported_not_raised():
 
 def test_profile_and_gaps_are_in_every_agent_prompt():
     store.add_fact("location", "Barcelona", "user")
-    prompt = llm.build_system_prompt(AGENTS["content"])
-    assert "(location) Barcelona" in prompt
-    assert "### Gaps: background, skills, projects, goals, voice" in prompt
+    context = sessions.plan_turn(AGENTS["content"], "hello").prompt
+    assert "(location) Barcelona" in context
+    assert "### Gaps: background, skills, projects, goals, voice" in context
+    # The system prompt carries only the rules, so it stays cacheable when facts change.
+    system = llm.build_system_prompt(AGENTS["content"])
+    assert "Shared Career Profile" in system
+    assert "(location) Barcelona" not in system
 
 
 def test_every_agent_gets_profile_tools():

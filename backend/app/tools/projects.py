@@ -37,7 +37,9 @@ REDACTIONS = [
 ASSIGNED_SECRET = re.compile(
     r"""(?i)((?:api[_-]?key|secret|token|password|passwd)["']?\s*[:=]\s*["']?)([^\s"',]{8,})"""
 )
-MAX_FILE_CHARS = 30_000
+# Kept small on purpose: every file an agent reads stays in its context for the rest of the session.
+MAX_FILE_CHARS = 8_000
+MAX_LISTED_FILES = 50
 MAX_WALK_FILES = 5_000
 
 
@@ -139,7 +141,7 @@ def list_recent_projects(limit: int = 10) -> list[dict]:
     return summaries[:limit]
 
 
-def list_project_files(name: str, limit: int = 200) -> list[dict]:
+def list_project_files(name: str, limit: int = MAX_LISTED_FILES) -> list[dict]:
     project = get_project(name)
     files = [(f, f.stat()) for f in walk_files(project.path)]
     files.sort(key=lambda item: item[1].st_mtime, reverse=True)
@@ -149,7 +151,7 @@ def list_project_files(name: str, limit: int = 200) -> list[dict]:
     ]
 
 
-def read_project_file(name: str, relative_path: str) -> str:
+def read_project_file(name: str, relative_path: str, start: int = 0) -> str:
     project = get_project(name)
     target = (project.path / relative_path).resolve()
     if not target.is_relative_to(project.path):
@@ -161,13 +163,18 @@ def read_project_file(name: str, relative_path: str) -> str:
         raise ProjectError("That file may contain secrets or private data, so it is blocked.")
     if not target.is_file():
         raise ProjectError("File not found.")
-    data = target.read_bytes()[: MAX_FILE_CHARS * 4]
+    with target.open("rb") as handle:
+        data = handle.read(2_000_000)
     if b"\x00" in data[:4096]:
         raise ProjectError("Binary file (image, video, build output). Describe it from its name instead.")
     text = data.decode("utf-8", errors="replace")
-    truncated = len(text) > MAX_FILE_CHARS
-    text = redact(text[:MAX_FILE_CHARS])
-    return text + ("\n\n[truncated]" if truncated else "")
+    start = max(0, start)
+    end = start + MAX_FILE_CHARS
+    # Redact before slicing so a key that straddles the cut is still caught.
+    chunk = redact(text)[start:end]
+    if len(text) > end:
+        chunk += f"\n\n[truncated at character {end} of {len(text)}; pass start={end} to read on]"
+    return chunk
 
 
 def project_git_log(name: str, days: int = 14, limit: int = 40) -> str:

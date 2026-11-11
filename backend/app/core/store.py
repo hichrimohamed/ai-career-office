@@ -147,7 +147,23 @@ CREATE TABLE IF NOT EXISTS portfolio_projects (
 );
 CREATE TABLE IF NOT EXISTS sessions (
     agent_id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL
+    session_id TEXT NOT NULL,
+    day TEXT NOT NULL,
+    model TEXT NOT NULL,
+    context_hash TEXT NOT NULL,
+    cost_usd REAL NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    api_turns INTEGER NOT NULL DEFAULT 0,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS standups (
     day TEXT PRIMARY KEY,
@@ -167,6 +183,10 @@ def connect() -> Iterator[sqlite3.Connection]:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     try:
+        # Sessions saved before day/model tracking are dropped: they are never resumed again.
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)")}
+        if columns and "cost_usd" not in columns:
+            conn.execute("DROP TABLE sessions")
         conn.executescript(SCHEMA)
         yield conn
         conn.commit()
@@ -191,21 +211,55 @@ def list_messages(agent_id: str) -> list[dict]:
     return [dict(row) for row in rows]
 
 
-def get_session(agent_id: str) -> str | None:
+def get_session(agent_id: str) -> dict | None:
     with connect() as conn:
-        row = conn.execute(
-            "SELECT session_id FROM sessions WHERE agent_id = ?", (agent_id,)
-        ).fetchone()
-    return row["session_id"] if row else None
+        row = conn.execute("SELECT * FROM sessions WHERE agent_id = ?", (agent_id,)).fetchone()
+    return dict(row) if row else None
 
 
-def set_session(agent_id: str, session_id: str) -> None:
+def set_session(
+    agent_id: str, session_id: str, day: str, model: str, context_hash: str, cost_usd: float = 0
+) -> None:
     with connect() as conn:
         conn.execute(
-            "INSERT INTO sessions (agent_id, session_id) VALUES (?, ?) "
-            "ON CONFLICT(agent_id) DO UPDATE SET session_id = excluded.session_id",
-            (agent_id, session_id),
+            "INSERT INTO sessions (agent_id, session_id, day, model, context_hash, cost_usd) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(agent_id) DO UPDATE SET session_id = excluded.session_id, day = excluded.day, "
+            "model = excluded.model, context_hash = excluded.context_hash, cost_usd = excluded.cost_usd",
+            (agent_id, session_id, day, model, context_hash, cost_usd),
         )
+
+
+def add_usage(agent_id: str, model: str, usage: dict) -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO usage (agent_id, model, api_turns, input_tokens, cache_write_tokens, cache_read_tokens, "
+            "output_tokens, cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                agent_id,
+                model,
+                usage.get("api_turns", 0),
+                usage.get("input_tokens", 0),
+                usage.get("cache_write_tokens", 0),
+                usage.get("cache_read_tokens", 0),
+                usage.get("output_tokens", 0),
+                usage.get("cost_usd", 0),
+            ),
+        )
+
+
+def usage_by_day(days: int = 14) -> list[dict]:
+    """Token and cost totals per day, agent and model, newest day first."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT date(created_at) AS day, agent_id, model, COUNT(*) AS messages, SUM(api_turns) AS api_turns, "
+            "SUM(input_tokens) AS input_tokens, SUM(cache_write_tokens) AS cache_write_tokens, "
+            "SUM(cache_read_tokens) AS cache_read_tokens, SUM(output_tokens) AS output_tokens, "
+            "ROUND(SUM(cost_usd), 4) AS cost_usd FROM usage WHERE created_at >= datetime('now', ?) "
+            "GROUP BY day, agent_id, model ORDER BY day DESC, cost_usd DESC",
+            (f"-{int(days)} days",),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 PROFILE_CATEGORIES = ["background", "skills", "projects", "goals", "location", "voice", "preferences"]

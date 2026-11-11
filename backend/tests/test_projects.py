@@ -55,3 +55,14 @@ def test_git_log_lists_recent_commits(roots):
     run("init", "-q")
     run("-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "Cut cost per clip")
     assert "Cut cost per clip" in projects.project_git_log("clip-agent")
+
+
+def test_long_files_are_read_in_small_chunks(roots, tmp_path):
+    project = projects.get_project("clip-agent")
+    (project.path / "LONG.md").write_text("a" * 8_000 + "b" * 500)
+
+    first = projects.read_project_file("clip-agent", "LONG.md")
+    rest = projects.read_project_file("clip-agent", "LONG.md", start=8_000)
+
+    assert first.startswith("a" * 8_000) and "pass start=8000" in first
+    assert rest == "b" * 500

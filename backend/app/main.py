@@ -10,7 +10,7 @@ from pydantic import BaseModel
 load_dotenv()
 
 from app.agents import AGENTS, Agent  # noqa: E402
-from app.core import coaching, drafts, jobs, linkedin, llm, profile, standup, store  # noqa: E402
+from app.core import coaching, drafts, jobs, linkedin, llm, profile, sessions, standup, store  # noqa: E402
 
 app = FastAPI(title="AI Career Office")
 
@@ -292,6 +292,12 @@ async def rerun_standup() -> dict:
     return await standup.todays_standup(refresh=True)
 
 
+@app.get("/usage")
+def get_usage(days: int = 14) -> list[dict]:
+    """Tokens and cost per day, agent and model, to see where the plan's credit goes."""
+    return store.usage_by_day(days)
+
+
 def sse(event: dict) -> str:
     return f"data: {json.dumps(event)}\n\n"
 
@@ -303,16 +309,24 @@ async def chat(agent_id: str, request: ChatRequest) -> StreamingResponse:
     if not message:
         raise HTTPException(status_code=422, detail="Message is empty")
 
+    turn = sessions.plan_turn(agent, message)
     store.add_message(agent.id, "user", message)
 
     async def events() -> AsyncIterator[str]:
         reply: list[str] = []
+        session_cost = turn.spent_usd
         try:
-            async for event in llm.stream_agent(agent, message, store.get_session(agent.id)):
+            async for event in llm.stream_agent(agent, turn.prompt, turn.resume, turn.tier, turn.spent_usd):
+                if event["type"] == "usage":
+                    store.add_usage(agent.id, event["model"], event["usage"])
+                    session_cost = event["usage"]["session_cost_usd"]
+                    continue
                 if event["type"] == "text":
                     reply.append(event["text"])
                 elif event["type"] == "done":
-                    store.set_session(agent.id, event["session_id"])
+                    store.set_session(
+                        agent.id, event["session_id"], turn.day, turn.tier, turn.context_hash, session_cost
+                    )
                 yield sse(event)
         except Exception as exc:  # surface SDK/CLI failures to the chat panel
             yield sse({"type": "error", "message": str(exc)})

@@ -14,6 +14,7 @@ COACH = Agent(
             "label": "Mock interview",
             "prompt": "Start a 5-question mock interview for a junior-to-mid AI engineer role. "
             "Mix LLM fundamentals, RAG, evals, agents and system design.",
+            "fresh": True,
         },
         {
             "label": "My skill gaps",
