@@ -32,3 +32,6 @@
   - [ ] Handoffs (Coach gap → Content idea, Scout job → Optimizer tips) — after Checkpoint C
   - [x] Morning standup — board facts per worker (`backend/app/core/standup.py`), voiced in one Haiku call, cached per day; panel + speech bubbles + one-click next step
 - [ ] **T9 Evals + README** — LLM-judge evals per agent, README with GIF
+  - [x] Eval harness + one case per agent (`backend/evals/`, run with `uv run pytest evals`); harness unit-tested with a mocked model
+  - [ ] First live run of the evals (blocked on the plan's session limit), fix whatever fails
+  - [ ] README: evals section, current status, demo GIF
