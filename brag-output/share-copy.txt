@@ -1,0 +1,3 @@
+My job search has an office. Four AI agents work at four desks: Nora writes my LinkedIn posts, Leo rewrites my profile, Maya scouts jobs and people, and Kai runs mock interviews. They keep working while I'm elsewhere, and every morning they hold a standup from their boards.
+
+Built with the Claude Agent SDK, FastAPI and three.js.
