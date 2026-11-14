@@ -1,3 +1,3 @@
-My job search has an office. Four AI agents work at four desks: Nora writes my LinkedIn posts, Leo rewrites my profile, Maya scouts jobs and people, and Kai runs mock interviews. They keep working while I'm elsewhere, and every morning they hold a standup from their boards.
+My AI agents got their own offices. I rebuilt the AI Career Office in Blender as four departments off a glass corridor: Nora's Content Studio, Leo's Profile Lab, Maya's Scouting Desk and Kai's Coaching Room, each with its own board, and they all meet for a standup every morning.
 
-Built with the Claude Agent SDK, FastAPI and three.js.
+Built with Blender, the Claude Agent SDK and three.js.
