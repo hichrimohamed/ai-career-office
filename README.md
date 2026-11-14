@@ -23,7 +23,9 @@ cd frontend && npm run dev   # http://localhost:5173
 
 The office and the four workers are built in Blender from Python scripts, so they can be edited and rebuilt:
 
-- `assets/office/build_office.py`: room, workstations, chairs, desk props, lounge (laid out to match `frontend/src/office.ts`)
+- `assets/office/build_office.py`: four department offices off a central corridor (Content Studio, Profile Lab,
+  Scouting Desk, Coaching Room), each with a glass front, sign, accent colour, workstation and themed props
+  (laid out to match `frontend/src/office.ts` and the board positions in `frontend/src/main.ts`)
 - `assets/characters/<name>.py`: Nora, Leo, Maya, Kai, using the shared toolkit in `assets/characters/toolkit.py`
   (metaball bodies, sculpted heads, clothing layers, one humanoid skeleton so the web app can seat and animate them)
 

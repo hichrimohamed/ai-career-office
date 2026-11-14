@@ -36,10 +36,10 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1b1d23);
 
 const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
-camera.position.set(9, 9, 11);
+camera.position.set(10, 13, 14); // matches the preview camera in assets/office/build_office.py
 
 const controls = new OrbitControls(camera, canvas);
-controls.target.set(0, 0.5, 0);
+controls.target.set(0, 0, 0.5);
 controls.enableDamping = true;
 controls.maxPolarAngle = Math.PI / 2.2;
 controls.minDistance = 2; // close enough to frame a seated worker
@@ -116,15 +116,17 @@ function toggleLeftPanel(name: keyof typeof leftPanels): void {
   }
 }
 
-const profileBoard = new WallBoard(CORKBOARD, new THREE.Vector3(-5, 2.1, -6.85));
+// Each board hangs in its department's office (see assets/office/build_office.py); the Career Profile
+// board is shared, at the west end of the corridor.
+const profileBoard = new WallBoard(CORKBOARD, new THREE.Vector3(-6.38, 1.75, 0), Math.PI / 2);
 profileBoard.mesh.userData.panel = 'profile';
-const jobsBoard = new WallBoard(WHITEBOARD, new THREE.Vector3(0, 2.1, -6.85));
-jobsBoard.mesh.userData.panel = 'jobs';
-const linkedInBoard = new WallBoard(CORKBOARD, new THREE.Vector3(5, 2.1, -6.85));
-linkedInBoard.mesh.userData.panel = 'linkedin';
-const draftsBoard = new WallBoard(WHITEBOARD, new THREE.Vector3(-7.85, 2.1, 2.5), Math.PI / 2);
+const draftsBoard = new WallBoard(WHITEBOARD, new THREE.Vector3(-1.75, 1.75, -6.7));
 draftsBoard.mesh.userData.panel = 'drafts';
-const coachingBoard = new WallBoard(CORKBOARD, new THREE.Vector3(-7.85, 2.1, -3), Math.PI / 2);
+const linkedInBoard = new WallBoard(CORKBOARD, new THREE.Vector3(1.75, 1.75, -6.7));
+linkedInBoard.mesh.userData.panel = 'linkedin';
+const jobsBoard = new WallBoard(WHITEBOARD, new THREE.Vector3(-6.38, 1.75, 4.3), Math.PI / 2);
+jobsBoard.mesh.userData.panel = 'jobs';
+const coachingBoard = new WallBoard(CORKBOARD, new THREE.Vector3(4.2, 1.75, 2.2));
 coachingBoard.mesh.userData.panel = 'coaching';
 const boards = [profileBoard.mesh, jobsBoard.mesh, linkedInBoard.mesh, draftsBoard.mesh, coachingBoard.mesh];
 scene.add(...boards);

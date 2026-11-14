@@ -3,12 +3,15 @@ import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
-/** Desk centres. Must match DESKS in assets/office/build_office.py. Workers sit 0.75 m in front (+z). */
+/**
+ * Desk centres, one per department office: Content Studio (NW), Profile Lab (NE), Scouting Desk (SW),
+ * Coaching Room (SE). Must match DESKS in assets/office/build_office.py. Workers sit 0.75 m in front (+z).
+ */
 export const DESK_POSITIONS: THREE.Vector3[] = [
-  new THREE.Vector3(-3, 0, -2),
-  new THREE.Vector3(3, 0, -2),
-  new THREE.Vector3(-3, 0, 2.5),
-  new THREE.Vector3(3, 0, 2.5),
+  new THREE.Vector3(-4.2, 0, -5.2),
+  new THREE.Vector3(4.2, 0, -5.2),
+  new THREE.Vector3(-4.2, 0, 3.4),
+  new THREE.Vector3(4.2, 0, 3.4),
 ];
 
 /** The office built in Blender (assets/office/build_office.py). */
@@ -28,10 +31,10 @@ export function addLighting(scene: THREE.Scene, renderer: THREE.WebGLRenderer): 
   sun.position.set(6, 10, 6);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
-  sun.shadow.camera.left = -10;
-  sun.shadow.camera.right = 10;
-  sun.shadow.camera.top = 10;
-  sun.shadow.camera.bottom = -10;
+  sun.shadow.camera.left = -11;
+  sun.shadow.camera.right = 11;
+  sun.shadow.camera.top = 11;
+  sun.shadow.camera.bottom = -11;
   sun.shadow.bias = -0.0004;
   sun.shadow.normalBias = 0.02;
   scene.add(sun);
@@ -74,15 +77,15 @@ function blockDesk(position: THREE.Vector3): THREE.Group {
 /** Simple box office, shown until the Blender model loads (and kept if it can't). */
 function blockOffice(): THREE.Group {
   const office = new THREE.Group();
-  const floor = new THREE.Mesh(new THREE.PlaneGeometry(16, 14), new THREE.MeshStandardMaterial({ color: 0xd8d2c4 }));
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(13, 13.6), new THREE.MeshStandardMaterial({ color: 0xd8d2c4 }));
   floor.rotation.x = -Math.PI / 2;
   office.add(floor);
 
   const wallMaterial = new THREE.MeshStandardMaterial({ color: 0xeee8dc });
-  const backWall = new THREE.Mesh(new THREE.BoxGeometry(16, 4, 0.2), wallMaterial);
-  backWall.position.set(0, 2, -7);
-  const sideWall = new THREE.Mesh(new THREE.BoxGeometry(0.2, 4, 14), wallMaterial);
-  sideWall.position.set(-8, 2, 0);
+  const backWall = new THREE.Mesh(new THREE.BoxGeometry(13, 3, 0.12), wallMaterial);
+  backWall.position.set(0, 1.5, -6.8);
+  const sideWall = new THREE.Mesh(new THREE.BoxGeometry(0.12, 3, 13.6), wallMaterial);
+  sideWall.position.set(-6.5, 1.5, 0);
   office.add(backWall, sideWall);
 
   for (const position of DESK_POSITIONS) office.add(blockDesk(position));
@@ -93,7 +96,8 @@ function blockOffice(): THREE.Group {
   return office;
 }
 
-const NO_SHADOW_CASTERS = new Set(['Floor', 'Rug', 'RugBorder', 'Daylight', 'Wall']);
+/** Flat or see-through parts of the office that shouldn't throw shadows (matched by material name prefix). */
+const NO_SHADOW_PREFIXES = ['Floor', 'Concrete', 'Slab', 'Rug', 'Mat', 'Daylight', 'Wall', 'Paint', 'Glass', 'Glow', 'Text'];
 
 export function buildOffice(scene: THREE.Scene): void {
   const fallback = blockOffice();
@@ -104,9 +108,17 @@ export function buildOffice(scene: THREE.Scene): void {
     .then((gltf) => {
       gltf.scene.traverse((node) => {
         if (!(node as THREE.Mesh).isMesh) return;
-        const materialName = ((node as THREE.Mesh).material as THREE.Material).name;
-        node.castShadow = !NO_SHADOW_CASTERS.has(materialName);
+        const material = (node as THREE.Mesh).material as THREE.MeshStandardMaterial;
+        node.castShadow = !NO_SHADOW_PREFIXES.some((prefix) => material.name.startsWith(prefix));
         node.receiveShadow = true;
+        if (material.name === 'Glass') {
+          // Office fronts and the south partition: keep them see-through and drawn after what's behind them.
+          material.transparent = true;
+          material.opacity = 0.16;
+          material.depthWrite = false;
+          node.receiveShadow = false;
+          node.renderOrder = 1;
+        }
       });
       scene.remove(fallback);
       scene.add(gltf.scene);

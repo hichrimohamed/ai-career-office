@@ -1,8 +1,16 @@
-"""The AI Career Office as a 3D scene: room, four workstations with chairs and props, lounge corner.
+"""The AI Career Office as a 3D floor: four department offices off a central corridor, one per agent.
 
-Coordinates in this script are the web scene's (three.js: Y up, the back wall at z = -7, desks at
-frontend/src/office.ts DESK_POSITIONS), converted to Blender's Z-up on the way in, so everything lines
-up with the workers and the wall boards the web app draws itself.
+    North row:  Content Studio (Nora)  |  Profile Lab (Leo)
+                ------------ corridor (Career Profile board at the west end) ------------
+    South row:  Scouting Desk (Maya)   |  Coaching Room (Kai)
+
+Each office has a glass front on the corridor with a door, a sign and a floor label in the department's
+colour, an accent wall, a rug, the agent's workstation and themed props. The walls facing the default
+camera (south and east) are cut down to knee height so you can look in, like a dollhouse.
+
+Coordinates in this script are the web scene's (three.js: Y up), converted to Blender's Z-up on the way
+in, so everything lines up with the workers and the wall boards the web app draws itself
+(frontend/src/office.ts DESK_POSITIONS and the board positions in frontend/src/main.ts).
 
     Blender --factory-startup -b -P assets/office/build_office.py -- --out frontend/public/models/office.glb [--preview <png>]
 """
@@ -18,11 +26,25 @@ import bmesh
 import bpy
 from mathutils import Matrix, Quaternion, Vector, noise
 
-DESKS = {  # agent id: desk centre (three.js x, z), same order as the web app
-    "content": (-3.0, -2.0),
-    "optimizer": (3.0, -2.0),
-    "scout": (-3.0, 2.5),
-    "coach": (3.0, 2.5),
+# Floor plan (three.js x, z). The building spans x -HALF_W..HALF_W and z -OUTER_Z..OUTER_Z.
+HALF_W = 6.5          # each office is HALF_W wide; the partition between east and west offices is at x = 0
+CORRIDOR = 1.8        # the corridor runs along x for |z| < CORRIDOR
+OUTER_Z = 6.8         # offices are OUTER_Z - CORRIDOR = 5 m deep
+WALL_H = 3.0
+KNEE_H = 0.95         # height of the cut-down walls facing the camera
+WALL_T = 0.12
+
+DESKS = {  # agent id: desk centre (three.js x, z), same order as the web app. Workers face -z.
+    "content": (-4.2, -5.2),
+    "optimizer": (4.2, -5.2),
+    "scout": (-4.2, 3.4),
+    "coach": (4.2, 3.4),
+}
+DEPARTMENTS = {  # agent id: (sign, agent name, accent colour = the worker colour in frontend/src/main.ts)
+    "content": ("CONTENT STUDIO", "Nora", "#2563eb"),
+    "optimizer": ("PROFILE LAB", "Leo", "#16a34a"),
+    "scout": ("SCOUTING DESK", "Maya", "#d97706"),
+    "coach": ("COACHING ROOM", "Kai", "#9333ea"),
 }
 DESK_TOP = 0.75
 SEAT_TOP = 0.52
@@ -60,7 +82,7 @@ def rgb(hex_color: str) -> tuple[float, float, float, float]:
 
 def material(name: str, color: str = "#ffffff", roughness: float = 0.7, metallic: float = 0.0,
              emission: str | None = None, strength: float = 1.0, texture: bpy.types.Image | None = None,
-             emission_texture: bpy.types.Image | None = None) -> bpy.types.Material:
+             emission_texture: bpy.types.Image | None = None, alpha: float = 1.0) -> bpy.types.Material:
     if name in _materials:
         return _materials[name]
     mat = bpy.data.materials.new(name)
@@ -84,6 +106,14 @@ def material(name: str, color: str = "#ffffff", roughness: float = 0.7, metallic
             links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
         else:
             bsdf.inputs["Emission Color"].default_value = rgb(emission)
+    if alpha < 1.0:  # exported as a glTF alphaMode BLEND material
+        bsdf.inputs["Alpha"].default_value = alpha
+        for attr, value in (("surface_render_method", "BLENDED"), ("blend_method", "BLEND")):
+            try:
+                setattr(mat, attr, value)
+                break
+            except (AttributeError, TypeError):
+                continue
     mat.diffuse_color = rgb(color)
     _materials[name] = mat
     return mat
@@ -236,83 +266,355 @@ def torus(center3, major: float, minor: float, mat, rotation: Quaternion | None 
 # --- The office -------------------------------------------------------------------------------------
 
 
+M: dict[str, bpy.types.Material] = {}  # shared materials, filled by build_office()
+
+
+def mix_hex(a: str, b: str, t: float) -> str:
+    """Blend two sRGB hex colours: t = 0 gives a, t = 1 gives b."""
+    ca = [int(a.lstrip("#")[i : i + 2], 16) for i in (0, 2, 4)]
+    cb = [int(b.lstrip("#")[i : i + 2], 16) for i in (0, 2, 4)]
+    return "#" + "".join(f"{round(x * (1 - t) + y * t):02x}" for x, y in zip(ca, cb))
+
+
+def local(cx: float, cz: float, angle: float):
+    """Position helper for furniture turned by `angle` about the vertical axis (same sense as yaw())."""
+    c, s = math.cos(angle), math.sin(angle)
+    return lambda dx, y, dz: (cx + dx * c + dz * s, y, cz - dx * s + dz * c)
+
+
+def facing(dx: float, dz: float) -> float:
+    """The yaw that turns an object's local -z (its front) toward the direction (dx, dz)."""
+    return math.atan2(-dx, -dz)
+
+
+def text(body: str, center3, size: float, mat, rotation: Quaternion | None = None, extrude: float = 0.004):
+    """3D lettering, converted to a mesh so it merges and exports like everything else.
+    With no rotation it lies flat on the floor, reading along +x for a camera on the +z side."""
+    curve = bpy.data.curves.new(f"Text {body}", "FONT")
+    curve.body = body
+    curve.size = size
+    curve.align_x = "CENTER"
+    curve.align_y = "CENTER"
+    curve.extrude = extrude
+    curve.materials.append(mat)
+    obj = bpy.data.objects.new(f"Text {body}", curve)
+    bpy.context.collection.objects.link(obj)
+    obj.location = T(*center3)
+    obj.rotation_mode = "QUATERNION"
+    obj.rotation_quaternion = rotation or Quaternion()
+    bpy.ops.object.select_all(action="DESELECT")
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.convert(target="MESH")
+    obj = bpy.context.view_layer.objects.active
+    objects.append(obj)
+    return obj
+
+
+UPRIGHT = Quaternion((1, 0, 0), math.pi / 2)  # text standing up, readable from +z
+FACE = {  # rotations for upright signs readable from each direction
+    "+z": UPRIGHT,
+    "-z": Quaternion((0, 0, 1), math.pi) @ UPRIGHT,
+    "+x": Quaternion((0, 0, 1), math.pi / 2) @ UPRIGHT,
+}
+
+
 def build_office() -> None:
     oak = wood_image("oak_floor", (0.72, 0.53, 0.36), planks=8)
     desk_oak = wood_image("desk_oak", (0.78, 0.6, 0.42), planks=4)
-    floor = material("Floor", roughness=0.55, texture=oak)
-    wall = material("Wall", "#ebe5da", 0.92)
-    baseboard = material("Baseboard", "#5e4a3c", 0.6)
-    frame_white = material("WindowFrame", "#f2f1ee", 0.45)
-    glass = material("Daylight", "#cfe2f5", 0.15, emission="#d6e8ff", strength=1.6)
-    desk_top = material("DeskTop", roughness=0.45, texture=desk_oak)
-    steel = material("Steel", "#2e3237", 0.38, metallic=0.85)
-    chrome = material("Chrome", "#c9ccd1", 0.22, metallic=1.0)
-    plastic_dark = material("PlasticDark", "#1b1d21", 0.4)
-    plastic_mid = material("PlasticMid", "#33363c", 0.5)
-    keycaps = material("Keycaps", "#d9dade", 0.55)
-    fabric = material("ChairFabric", "#2c333d", 0.95)
-    sofa_fabric = material("SofaFabric", "#3d5a6a", 0.95)
-    cushion = material("Cushion", "#c9a46a", 0.95)
-    rug = material("Rug", "#4b5563", 0.98)
-    rug_border = material("RugBorder", "#c9bfae", 0.98)
-    shelf_wood = material("ShelfWood", "#7b5b40", 0.6)
-    ceramic = material("Ceramic", "#e9e4dc", 0.35)
-    terracotta = material("Terracotta", "#b5653d", 0.8)
-    leaf = material("Leaf", "#3f7a3a", 0.7)
-    leaf_light = material("LeafLight", "#5c9a4b", 0.7)
-    soil = material("Soil", "#3a2a1e", 0.95)
+    M.update(
+        floor=material("Floor", roughness=0.55, texture=oak),
+        concrete=material("Concrete", "#b9b6b0", 0.35),
+        slab=material("Slab", "#55585e", 0.8),
+        wall=material("Wall", "#ebe5da", 0.92),
+        cap=material("WallCap", "#3a3d43", 0.5),
+        frame=material("GlassFrame", "#26282c", 0.35, metallic=0.6),
+        window_frame=material("WindowFrame", "#f2f1ee", 0.45),
+        daylight=material("Daylight", "#cfe2f5", 0.15, emission="#d6e8ff", strength=1.6),
+        glass=material("Glass", "#dcebf0", 0.05, alpha=0.16),
+        desk_top=material("DeskTop", roughness=0.45, texture=desk_oak),
+        steel=material("Steel", "#2e3237", 0.38, metallic=0.85),
+        chrome=material("Chrome", "#c9ccd1", 0.22, metallic=1.0),
+        dark=material("PlasticDark", "#1b1d21", 0.4),
+        mid=material("PlasticMid", "#33363c", 0.5),
+        keycaps=material("Keycaps", "#d9dade", 0.55),
+        fabric=material("ChairFabric", "#2c333d", 0.95),
+        shelf_wood=material("ShelfWood", "#7b5b40", 0.6),
+        ceramic=material("Ceramic", "#e9e4dc", 0.35),
+        terracotta=material("Terracotta", "#b5653d", 0.8),
+        leaf=material("Leaf", "#3f7a3a", 0.7),
+        leaf_light=material("LeafLight", "#5c9a4b", 0.7),
+        soil=material("Soil", "#3a2a1e", 0.95),
+        paper=material("Paper", "#f4f1ea", 0.9),
+        cork=material("Cork", "#b8915e", 0.95),
+        title=material("FloorTitle", "#f4f1ea", 0.5),
+    )
+
+    shell()
+    screens = {agent: screen_image(f"screen_{agent}", tuple(int(accent[i : i + 2], 16) / 255 for i in (1, 3, 5)))
+               for agent, (_, _, accent) in DEPARTMENTS.items()}
     lamp_shade = material("LampShade", "#1e2023", 0.5)
     bulb = material("Bulb", "#fff3d6", 0.3, emission="#ffe2b0", strength=6.0)
     cord = material("Cord", "#111113", 0.6)
-    paper = material("Paper", "#f4f1ea", 0.9)
-    cork = material("Cork", "#b8915e", 0.95)
-
-    # Room: floor, two walls with baseboards (front and right stay open so the camera can look in).
-    box((0, -0.05, 0), (16, 0.1, 14), floor, uv_scale=0.5)
-    box((0, 2, -7), (16, 4, 0.2), wall)
-    box((-8, 2, 0), (0.2, 4, 14), wall)
-    box((0, 0.06, -6.88), (16, 0.12, 0.04), baseboard)
-    box((-7.88, 0.06, 0), (0.04, 0.12, 14), baseboard)
-
-    # Daylight windows between the wall boards.
-    for x in (-2.5, 2.5):
-        window((x, 1.85, -6.89), 1.3, 1.7, "back", glass, frame_white)
-    window((-7.89, 1.85, 5.5), 1.5, 1.7, "left", glass, frame_white)
-
-    # Rug under the workstations.
-    box((0, 0.004, 0.25), (11, 0.008, 8.6), rug_border)
-    box((0, 0.009, 0.25), (10.6, 0.008, 8.2), rug)
-
-    screens = {
-        "content": screen_image("screen_content", (0.15, 0.39, 0.92)),
-        "optimizer": screen_image("screen_optimizer", (0.09, 0.64, 0.29)),
-        "scout": screen_image("screen_scout", (0.85, 0.47, 0.02)),
-        "coach": screen_image("screen_coach", (0.58, 0.2, 0.92)),
-    }
     for agent, (dx, dz) in DESKS.items():
-        workstation(agent, dx, dz, desk_top, steel, chrome, plastic_dark, plastic_mid, keycaps, fabric,
-                    material(f"Screen_{agent}", "#111111", 0.2, emission_texture=screens[agent], strength=1.4))
+        department(agent)
+        workstation(agent, dx, dz, M["desk_top"], M["steel"], M["chrome"], M["dark"], M["mid"], M["keycaps"],
+                    M["fabric"], material(f"Screen_{agent}", "#111111", 0.2, emission_texture=screens[agent],
+                                          strength=1.4))
         pendant(dx, dz, lamp_shade, bulb, cord)
-    desk_props(paper, cork, ceramic, chrome, plastic_dark, steel, shelf_wood)
+    desk_props(M["paper"], M["cork"], M["ceramic"], M["chrome"], M["dark"], M["steel"], M["shelf_wood"])
 
-    # Low bookshelf under the Jobs board.
-    bookshelf((0, 0, -6.68), shelf_wood, paper)
+    content_studio()
+    profile_lab()
+    scouting_desk()
+    coaching_room()
+    corridor()
 
-    # Coffee counter on the left wall.
-    box((-7.55, 0.45, -0.25), (0.6, 0.9, 1.7), shelf_wood, bevel=0.03)
-    box((-7.55, 0.915, -0.25), (0.64, 0.03, 1.74), material("Counter", "#d9d4cb", 0.3))
-    box((-7.6, 1.1, -0.65), (0.32, 0.34, 0.28), plastic_dark, bevel=0.08)  # coffee machine
-    box((-7.5, 1.0, -0.65), (0.14, 0.03, 0.18), chrome)
-    for i, z in enumerate((-0.05, 0.1, 0.25)):
-        cylinder((-7.45, 0.98, z), 0.04, 0.1, ceramic, radius_top=0.045)
 
-    # Lounge corner: sofa and coffee table.
-    lounge(sofa_fabric, cushion, desk_top, steel)
+def shell() -> None:
+    """Plinth, floors and the walls shared by the four offices."""
+    w, d = 2 * HALF_W, 2 * OUTER_Z
+    box((0, -0.2, 0), (w + 0.8, 0.3, d + 0.8), M["slab"])
+    box((0, -0.05, 0), (w, 0.1, 2 * CORRIDOR), M["concrete"])
+    for sx in (-1, 1):
+        for sz in (-1, 1):
+            box((sx * HALF_W / 2, -0.05, sz * (CORRIDOR + OUTER_Z) / 2), (HALF_W, 0.1, OUTER_Z - CORRIDOR),
+                M["floor"], uv_scale=0.5)
 
-    # Plants in the corners and by the window.
-    for i, (x, z, scale) in enumerate(((-7.3, -6.3, 1.2), (7.3, -6.4, 1.0), (-7.3, 6.4, 1.1), (7.3, 6.3, 0.9),
-                                       (-1.25, -6.55, 0.6), (1.25, -6.55, 0.6))):
-        plant(x, z, scale, terracotta if i % 2 else ceramic, soil, leaf if i % 3 else leaf_light, seed=i)
+    wall, room_d = M["wall"], OUTER_Z - CORRIDOR
+    # Full-height walls at the back (north) and the far side (west), and the partition between offices.
+    box((0, WALL_H / 2, -OUTER_Z), (w + WALL_T, WALL_H, WALL_T), wall)
+    box((-HALF_W, WALL_H / 2, 0), (WALL_T, WALL_H, d + WALL_T), wall)
+    north_z = -(CORRIDOR + OUTER_Z) / 2
+    box((0, WALL_H / 2, north_z), (WALL_T, WALL_H, room_d), wall)
+    box((0, WALL_H + 0.01, north_z), (WALL_T + 0.02, 0.02, room_d), M["cap"])
+    # Between the two south offices the partition is glass, so the camera sees into both.
+    z0, z1 = CORRIDOR, OUTER_Z - WALL_T / 2
+    box((0, WALL_H / 2, (z0 + z1) / 2), (0.02, WALL_H, z1 - z0), M["glass"])
+    box((0, WALL_H - 0.03, (z0 + z1) / 2), (0.07, 0.06, z1 - z0), M["frame"])
+    box((0, 0.025, (z0 + z1) / 2), (0.07, 0.05, z1 - z0), M["frame"])
+    for i in range(5):
+        box((0, WALL_H / 2, z0 + i * (z1 - z0) / 4), (0.07, WALL_H, 0.05), M["frame"])
+    box((0, WALL_H + 0.01, -OUTER_Z), (w + WALL_T + 0.02, 0.02, WALL_T + 0.02), M["cap"])
+    box((-HALF_W, WALL_H + 0.01, 0), (WALL_T + 0.02, 0.02, d + WALL_T + 0.02), M["cap"])
+
+    # Walls facing the camera (south, and east beside the offices) are cut to knee height.
+    box((0, KNEE_H / 2, OUTER_Z), (w + WALL_T, KNEE_H, WALL_T), wall)
+    box((0, KNEE_H + 0.015, OUTER_Z), (w + WALL_T + 0.04, 0.03, WALL_T + 0.04), M["cap"])
+    for sz in (-1, 1):
+        cz = sz * (CORRIDOR + OUTER_Z) / 2
+        box((HALF_W, KNEE_H / 2, cz), (WALL_T, KNEE_H, room_d), wall)
+        box((HALF_W, KNEE_H + 0.015, cz), (WALL_T + 0.04, 0.03, room_d + 0.04), M["cap"])
+
+    # Glass fronts on the corridor, with a door near the partition.
+    for agent in DESKS:
+        sx = -1 if agent in ("content", "scout") else 1
+        sz = -1 if agent in ("content", "optimizer") else 1
+        glass_front(agent, sx, sz * CORRIDOR)
+
+
+def glass_front(agent: str, sx: int, z: float) -> None:
+    """Glass wall from the partition (x = 0) to the outer wall at x = sx * HALF_W, door 0.4..1.4 m from the partition."""
+    sign_name, person, accent = DEPARTMENTS[agent]
+    glow = material(f"Glow_{agent}", accent, 0.4, emission=accent, strength=2.2)
+    band = material(f"Accent_{agent}", accent, 0.5)
+    door0, door1, door_h = 0.4, 1.4, 2.3
+    xs = lambda u: sx * u  # distance from the partition -> world x
+    for u0, u1 in ((0.06, door0), (door1, HALF_W - 0.06)):
+        box((xs((u0 + u1) / 2), WALL_H / 2, z), (u1 - u0, WALL_H, 0.02), M["glass"])
+        # Frosted band in the department colour at eye level, like the reference HQ.
+        if u1 - u0 > 1:
+            box((xs((u0 + u1) / 2 + 0.2), 1.3, z), (u1 - u0 - 0.6, 0.1, 0.03), band)
+    box((xs((door0 + door1) / 2), (door_h + WALL_H) / 2, z), (door1 - door0, WALL_H - door_h, 0.02), M["glass"])
+    box((xs(HALF_W / 2), WALL_H - 0.03, z), (HALF_W, 0.06, 0.07), M["frame"])
+    box((xs((door0 + door1) / 2), door_h, z), (door1 - door0, 0.05, 0.07), M["frame"])
+    for u0, u1 in ((0.06, door0), (door1, HALF_W - 0.06)):
+        box((xs((u0 + u1) / 2), 0.025, z), (u1 - u0, 0.05, 0.07), M["frame"])
+    posts = [door0, door1] + [door1 + i * (HALF_W - door1) / 4 for i in range(1, 4)]
+    for u in posts:
+        box((xs(u), WALL_H / 2, z), (0.05, WALL_H, 0.07), M["frame"])
+
+    # Sign over the door, on the corridor side, and the department name on the corridor floor.
+    out = 1 if z < 0 else -1  # which way the corridor is: +z for the north offices
+    sign_z = z + out * 0.06
+    sign_x = xs(1.9)
+    box((sign_x, 2.66, sign_z), (2.6, 0.36, 0.04), M["dark"])
+    text(f"{sign_name}  ·  {person}", (sign_x, 2.66, sign_z + out * 0.025), 0.15, glow,
+         FACE["+z" if out > 0 else "-z"], extrude=0.003)
+    text(sign_name, (xs(HALF_W / 2), 0.004, z + out * 0.5), 0.34, glow, extrude=0.002)
+
+
+def department(agent: str) -> None:
+    """The parts every office has: an accent wall behind its board, a rug and a plant by the door."""
+    _, _, accent = DEPARTMENTS[agent]
+    paint = material(f"Paint_{agent}", mix_hex(accent, "#ebe5da", 0.62), 0.9)
+    rug = material(f"Rug_{agent}", mix_hex(accent, "#d8d2c6", 0.72), 0.98)
+    rug_border = material(f"RugBorder_{agent}", mix_hex(accent, "#3a3d43", 0.35), 0.98)
+    face = WALL_T / 2 + 0.005
+    room_d = OUTER_Z - CORRIDOR
+    if agent == "content":  # back wall of the west half
+        box((-HALF_W / 2, WALL_H / 2, -OUTER_Z + face), (HALF_W - WALL_T, WALL_H, 0.01), paint)
+    elif agent == "optimizer":
+        box((HALF_W / 2, WALL_H / 2, -OUTER_Z + face), (HALF_W - WALL_T, WALL_H, 0.01), paint)
+    elif agent == "scout":  # west wall
+        box((-HALF_W + face, WALL_H / 2, (CORRIDOR + OUTER_Z) / 2), (0.01, WALL_H, room_d - WALL_T), paint)
+
+    dx, dz = DESKS[agent]
+    box((dx, 0.004, dz + 0.3), (3.0, 0.008, 2.6), rug_border)
+    box((dx, 0.009, dz + 0.3), (2.8, 0.008, 2.4), rug)
+
+
+# --- The four departments -------------------------------------------------------------------------
+
+
+def content_studio() -> None:
+    """Nora, north-west: a writer's desk under the window, a bookshelf, and a recording corner."""
+    window((-4.6, 1.75, -OUTER_Z + 0.08), 1.8, 1.7, "back", M["daylight"], M["window_frame"])
+    window((-HALF_W + 0.08, 1.75, -3.2), 1.8, 1.7, "left", M["daylight"], M["window_frame"])
+    bookshelf((-4.6, 0, -6.5), M["shelf_wood"], M["paper"])
+
+    # Recording corner: a stool lit by a ring light, a camera on a tripod pointing at it.
+    stool((-1.0, -4.3))
+    ring = material("RingLight", "#fff8ec", 0.3, emission="#fff4e0", strength=4.0)
+    rx, rz = -2.6, -3.2
+    tripod(rx, rz, 1.45)
+    q = yaw(facing(-1.0 - rx, -4.3 - rz)) @ Quaternion((1, 0, 0), math.pi / 2)
+    torus((rx, 1.6, rz), 0.3, 0.035, ring, rotation=q, segments=32)
+    cx, cz = -1.9, -2.7
+    tripod(cx, cz, 1.25)
+    p = local(cx, cz, facing(-1.0 - cx, -4.3 - cz))
+    box(p(0, 1.33, 0), (0.22, 0.15, 0.14), M["dark"], rotation=yaw(facing(-1.0 - cx, -4.3 - cz)), bevel=0.15)
+    rod(p(0, 1.34, -0.07), p(0, 1.34, -0.2), 0.045, M["mid"])
+    plant(-5.9, -2.35, 1.1, M["ceramic"], M["soil"], M["leaf"], seed=1)
+
+
+def profile_lab() -> None:
+    """Leo, north-east: a headshot corner (backdrop, stool, softbox) for the profile photo."""
+    window((4.6, 1.75, -OUTER_Z + 0.08), 1.8, 1.7, "back", M["daylight"], M["window_frame"])
+
+    backdrop = material("Backdrop", "#8f99a6", 0.95)
+    bx, z0, z1, top = 0.32, -4.75, -2.55, 2.4
+    for z in (z0, z1):
+        rod((bx, 0, z), (bx, top, z), 0.02, M["steel"])
+        cylinder((bx, 0.01, z), 0.14, 0.02, M["steel"])
+    rod((bx, top, z0 - 0.05), (bx, top, z1 + 0.05), 0.045, backdrop)
+    box((bx + 0.03, (top + 0.3) / 2, (z0 + z1) / 2), (0.01, top - 0.3, z1 - z0 - 0.1), backdrop)
+    box((bx + 0.95, 0.012, (z0 + z1) / 2), (0.7, 0.01, z1 - z0 - 0.1), backdrop)
+    stool((1.15, -3.65))
+
+    # Softbox on a stand, aimed at the stool.
+    sx, sz = 2.7, -2.55
+    tripod(sx, sz, 1.55)
+    turn = facing(1.15 - sx, -3.65 - sz)
+    p = local(sx, sz, turn)
+    box(p(0, 1.7, 0), (0.62, 0.62, 0.3), M["dark"], rotation=yaw(turn), bevel=0.05)
+    box(p(0, 1.7, -0.155), (0.56, 0.56, 0.01), material("Softbox", "#ffffff", 0.4, emission="#fff6e8", strength=3.0),
+        rotation=yaw(turn))
+    plant(5.9, -2.35, 1.0, M["terracotta"], M["soil"], M["leaf_light"], seed=2)
+
+
+def scouting_desk() -> None:
+    """Maya, south-west: a telescope at the window, a globe, filing cabinets of leads."""
+    _, _, accent = DEPARTMENTS["scout"]
+    brass = material("Brass", "#b08d4a", 0.35, metallic=0.9)
+
+    # Telescope on a tripod, looking out over the low wall.
+    tx, tz = -2.4, 5.9
+    tripod(tx, tz, 1.05)
+    tube = material("Telescope", mix_hex(accent, "#1b1d21", 0.25), 0.35)
+    rod((tx, 1.08, tz - 0.35), (tx + 0.12, 1.42, tz + 0.45), 0.065, tube)
+    rod((tx, 1.08, tz - 0.35), (tx - 0.02, 1.02, tz - 0.48), 0.025, M["dark"])
+
+    # Globe on a stand.
+    gx, gz = -1.0, 5.8
+    cylinder((gx, 0.02, gz), 0.2, 0.04, M["shelf_wood"])
+    rod((gx, 0.04, gz), (gx, 0.8, gz), 0.025, brass)
+    sphere((gx, 1.05, gz), (0.26, 0.26, 0.26), material("Globe", "#3b78b8", 0.4), segments=24, rings=14)
+    torus((gx, 1.05, gz), 0.3, 0.012, brass, rotation=Quaternion((1, 0, 0), math.pi / 2), segments=32)
+    for i in range(6):  # continents
+        a = i * 1.1
+        sphere((gx + 0.24 * math.cos(a), 1.05 + 0.12 * math.sin(i * 2.3), gz + 0.24 * math.sin(a)),
+               (0.08, 0.06, 0.08), material("Land", "#5c9a4b", 0.6))
+
+    # Filing cabinets against the partition, drawers facing into the room (-x).
+    grey = material("Cabinet", "#8b929b", 0.45, metallic=0.3)
+    for z in (3.0, 3.62):
+        box((-0.36, 0.65, z), (0.58, 1.3, 0.6), grey, bevel=0.02)
+        for k in range(4):
+            y = 0.18 + k * 0.31
+            box((-0.655, y, z), (0.01, 0.27, 0.54), grey)
+            box((-0.67, y + 0.07, z), (0.02, 0.025, 0.14), M["chrome"])
+            box((-0.665, y + 0.07, z + 0.12), (0.01, 0.05, 0.06), M["paper"])
+    plant(-5.9, 6.35, 1.0, M["terracotta"], M["soil"], M["leaf"], seed=3)
+
+
+def coaching_room() -> None:
+    """Kai, south-east: two armchairs facing each other for mock interviews, a side table, a water cooler."""
+    _, _, accent = DEPARTMENTS["coach"]
+    upholstery = material("Armchair", mix_hex(accent, "#3a3d43", 0.45), 0.95)
+    armchair(1.55, 5.75, -math.pi / 2, upholstery)  # facing +x
+    armchair(3.65, 5.75, math.pi / 2, upholstery)  # facing -x
+    cylinder((2.6, 0.55, 6.15), 0.28, 0.03, M["desk_top"], segments=32)
+    rod((2.6, 0.54, 6.15), (2.6, 0.02, 6.15), 0.025, M["steel"])
+    cylinder((2.6, 0.015, 6.15), 0.18, 0.03, M["steel"])
+    for dx in (-0.08, 0.1):
+        cylinder((2.6 + dx, 0.62, 6.1), 0.035, 0.11, material("Water", "#bfe3f5", 0.05), segments=16)
+    box((2.45, 0.572, 6.25), (0.16, 0.01, 0.22), M["paper"], rotation=yaw(0.3))
+
+    # Rolling stand for the Coaching board (the web app draws the board face), in front of Kai's desk.
+    bx, bz, half = DESKS["coach"][0], 2.2, 1.65
+    for side in (-1, 1):
+        x = bx + side * half
+        box((x, 1.42, bz), (0.05, 2.84, 0.05), M["steel"])
+        box((x, 0.04, bz), (0.06, 0.04, 0.6), M["steel"])
+        for end in (-1, 1):
+            sphere((x, 0.03, bz + end * 0.27), (0.03, 0.03, 0.03), M["dark"])
+    box((bx, 0.5, bz), (2 * half, 0.04, 0.04), M["steel"])
+
+    # Water cooler by the east wall.
+    wx, wz = 6.05, 5.0
+    box((wx, 0.5, wz), (0.36, 1.0, 0.36), M["ceramic"], bevel=0.05)
+    cylinder((wx, 1.22, wz), 0.15, 0.44, material("Water", "#bfe3f5", 0.05), segments=24)
+    box((wx - 0.19, 0.85, wz), (0.03, 0.05, 0.08), M["mid"])
+    plant(5.9, 6.35, 1.15, M["ceramic"], M["soil"], M["leaf_light"], seed=4)
+
+
+def corridor() -> None:
+    """The title on the floor, a welcome mat and plants at the open east end."""
+    text("AI CAREER OFFICE", (0.6, 0.004, 0), 0.42, M["title"], extrude=0.002)
+    box((HALF_W - 0.45, 0.006, 0), (0.7, 0.012, 1.8), material("Mat", "#3a3d43", 0.98))
+    for sz in (-1, 1):
+        plant(HALF_W - 0.35, sz * (CORRIDOR - 0.3), 0.9, M["terracotta"], M["soil"], M["leaf"], seed=5 + sz)
+
+
+# --- Furniture ---------------------------------------------------------------------------------------
+
+
+def tripod(x: float, z: float, top: float) -> None:
+    for i in range(3):
+        a = 2 * math.pi * i / 3 + 0.4
+        rod((x, top - 0.25, z), (x + math.cos(a) * 0.32, 0.0, z + math.sin(a) * 0.32), 0.012, M["steel"])
+    rod((x, top - 0.3, z), (x, top, z), 0.016, M["steel"])
+
+
+def stool(xz) -> None:
+    x, z = xz
+    cylinder((x, 0.62, z), 0.2, 0.05, M["fabric"], segments=24)
+    cylinder((x, 0.35, z), 0.025, 0.5, M["chrome"])
+    cylinder((x, 0.02, z), 0.22, 0.03, M["chrome"], segments=24)
+    torus((x, 0.3, z), 0.17, 0.01, M["chrome"])
+
+
+def armchair(cx: float, cz: float, angle: float, fabric) -> None:
+    """Lounge armchair; a sitter faces local -z, turned by `angle`."""
+    p, q = local(cx, cz, angle), yaw(angle)
+    box(p(0, 0.24, 0), (0.82, 0.26, 0.78), fabric, rotation=q, bevel=0.15)
+    box(p(0, 0.42, -0.02), (0.62, 0.12, 0.66), fabric, rotation=q, bevel=0.35)
+    box(p(0, 0.68, 0.32), (0.82, 0.58, 0.16), fabric, rotation=q, bevel=0.3)
+    for side in (-1, 1):
+        box(p(side * 0.36, 0.52, 0), (0.12, 0.34, 0.78), fabric, rotation=q, bevel=0.3)
+        for end in (-1, 1):
+            box(p(side * 0.33, 0.05, end * 0.3), (0.05, 0.1, 0.05), M["steel"], rotation=q)
 
 
 def window(center3, width: float, height: float, wall: str, glass, frame) -> None:
@@ -377,7 +679,7 @@ def workstation(agent, dx, dz, desk_top, steel, chrome, plastic_dark, plastic_mi
 
 
 def pendant(dx, dz, shade, bulb, cord) -> None:
-    rod((dx, 4.2, dz), (dx, 2.62, dz), 0.006, cord)
+    rod((dx, WALL_H, dz), (dx, 2.62, dz), 0.006, cord)
     cylinder((dx, 2.52, dz), 0.26, 0.2, shade, radius_top=0.07, segments=32)
     sphere((dx, 2.44, dz), (0.07, 0.05, 0.07), bulb)
 
@@ -463,27 +765,6 @@ def bookshelf(center3, wood, paper) -> None:
                 x += 0.12
 
 
-def lounge(fabric, cushion, wood, steel) -> None:
-    cx, cz = 5.3, 6.1
-    box((cx, 0.22, cz), (2.2, 0.26, 0.85), fabric, bevel=0.15)  # base
-    box((cx, 0.42, cz + 0.05), (2.0, 0.14, 0.75), fabric, bevel=0.35)  # seat cushion
-    box((cx, 0.65, cz + 0.36), (2.2, 0.6, 0.18), fabric, bevel=0.3)  # back
-    for side in (-1, 1):
-        box((cx + side * 1.05, 0.48, cz), (0.18, 0.4, 0.85), fabric, bevel=0.3)  # arms
-    for i, side in enumerate((-0.55, 0.55)):
-        box((cx + side, 0.66, cz + 0.2), (0.42, 0.36, 0.12), cushion if i == 0 else fabric, bevel=0.45,
-            rotation=Quaternion((1, 0, 0), math.radians(-14)))
-    for i in range(4):
-        box((cx + (-0.95 if i < 2 else 0.95), 0.045, cz + (-0.33 if i % 2 else 0.33)), (0.05, 0.09, 0.05), steel)
-    # Coffee table with a plant-free top: a magazine and a cup.
-    tx, tz = 5.3, 4.9
-    box((tx, 0.4, tz), (1.1, 0.04, 0.6), wood, bevel=0.1, uv_scale=1.2)
-    for sx in (-0.5, 0.5):
-        for sz in (-0.25, 0.25):
-            rod((tx + sx, 0.38, tz + sz), (tx + sx, 0.0, tz + sz), 0.015, steel)
-    box((tx - 0.2, 0.425, tz), (0.22, 0.008, 0.3), material("Magazine", "#c84b31", 0.5), rotation=yaw(0.3))
-
-
 def plant(x, z, scale, pot, soil, leaf_mat, seed) -> None:
     rng = random.Random(seed)
     h = 0.42 * scale
@@ -544,8 +825,8 @@ def render_preview(path: str) -> None:
     camera = bpy.data.objects.new("Camera", bpy.data.cameras.new("Camera"))
     camera.data.lens = 28
     bpy.context.collection.objects.link(camera)
-    camera.location = T(9, 9, 11)
-    camera.rotation_euler = (T(0, 0.5, 0) - camera.location).to_track_quat("-Z", "Y").to_euler()
+    camera.location = T(10, 13, 14)  # the web app's default view (frontend/src/main.ts)
+    camera.rotation_euler = (T(0, 0, 0.5) - camera.location).to_track_quat("-Z", "Y").to_euler()
     scene.camera = camera
     scene.render.filepath = path
     bpy.ops.render.render(write_still=True)
